@@ -115,8 +115,25 @@ def main(args):
         lw_client.set_subaccount(subaccount["accountName"])
 
         mids = get_relevant_mids(lw_client, start_time, end_time, args.filter)
-        if len(mids) > 0:
-            vulns = get_host_vulns(lw_client, start_time, end_time, mids)
+        mid_count = len(mids)
+        if mid_count > 0:
+            
+            vulns = list()
+
+            # I've seen issues when putting all the mids through at once, so we should batch them 
+            # into batches of N for the moment
+            batch_count = 0
+            batch_size = 10_000
+            logger.debug(f'total mid count: {mid_count}')
+            if mid_count > batch_size : 
+                idx = batch_count * batch_size
+                while (idx < mid_count) and (idx < mid_count):
+                    logger.debug(f'current index: {idx}')
+                    vulns.extend(get_host_vulns(lw_client, start_time, end_time, mids[idx:(idx+ batch_size)-1]))
+                    batch_count += 1
+                    idx = batch_count * batch_size
+            else:
+                vulns.extend(get_host_vulns(lw_client, start_time, end_time, mids))
 
             vulns_df = pd.json_normalize(vulns)
 
