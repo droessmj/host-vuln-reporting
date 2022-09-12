@@ -19,33 +19,42 @@ def get_start_end_times(day_delta=1):
     return start_time, end_time
 
 
-def get_relevant_mids(lw_client, start_time, end_time):
-    # Fetch vulnerability pages
-    machine_ids = lw_client.entities.machines.search(json={
-        "timeFilter": {
-            "startTime": start_time,
-            "endTime": end_time
-        },
-        # "filters": [
-        #     {
-        #         "field": "hostname",
-        #         "expression": "rlike",
-        #         "value": "om-mongo-friends-prod.*"
-        #     }
-        # ],
-        "returns": [ "mid" ] 
-    })
+def get_relevant_mids(lw_client, start_time, end_time, filter):
+
+    if filter != "":
+        # Fetch vulnerability pages
+        machine_ids = lw_client.entities.machines.search(json={
+            "timeFilter": {
+                "startTime": start_time,
+                "endTime": end_time
+            },
+            "filters": [
+                {
+                    "field": "hostname",
+                    "expression": "rlike",
+                    "value": filter
+                }
+            ],
+            "returns": [ "mid" ] 
+        })
+    else:
+        machine_ids = lw_client.entities.machines.search(json={
+            "timeFilter": {
+                "startTime": start_time,
+                "endTime": end_time
+            },
+            "returns": [ "mid" ] 
+        })
 
     mids = list()
-
     for r in machine_ids:
         for mid in r['data']:
-            mids.append(mid)
+            mids.append(mid['mid'])
 
     return mids
 
 
-def get_host_vulns(lw_client):
+def get_host_vulns(lw_client, start_time, end_time, mids):
     vulnerability_pages = lw_client.vulnerabilities.hosts.search(json={
         "timeFilter": {
             "startTime": start_time,
@@ -56,12 +65,16 @@ def get_host_vulns(lw_client):
                 "field": "status",
                 "expression": "in",
                 "values": ["Active","New","Reopened"]
+            },
+            {
+                "field": "mid",
+                "expression": "in",
+                "values": mids
             }
         ]
     })
 
     vulns = list()
-
     for r in vulnerability_pages:
         for vuln in r['data']:
             vulns.append(vuln)
@@ -95,27 +108,40 @@ def main(args):
     user_profile_data = user_profile.get("data", {})[0]
 
     # Build start/end times
-    start_time, end_time = get_start_end_times(day_delta=2)
+    start_time, end_time = get_start_end_times(day_delta=args.days)
 
     # Iterate through all subaccounts
     for subaccount in user_profile_data.get("accounts", []):
 
         # Print the account name
-        print(subaccount["accountName"])
+        print(f'Processing {subaccount["accountName"]}...')
 
         lw_client.set_subaccount(subaccount["accountName"])
 
-        vulns = get_host_vulns(lw_client, start_time, end_time)
-        mids = get_relevant_mids(lw_client, start_time, end_time)
+        mids = get_relevant_mids(lw_client, start_time, end_time, args.filter)
+        if len(mids) > 0:
+            vulns = get_host_vulns(lw_client, start_time, end_time, mids)
+            vulns_df = pd.json_normalize(vulns)
 
-        vulns_df = pd.json_normalize(vulns)
+            # https://stackoverflow.com/questions/27965295/dropping-rows-from-dataframe-based-on-a-not-in-condition
+            # Drop the vuln records for hosts not in our desired list
+            # mid_filtered_df = vulns_df[~vulns_df['mid'].isin(mids)]
 
-        # https://stackoverflow.com/questions/27965295/dropping-rows-from-dataframe-based-on-a-not-in-condition
-        mid_filtered_df = vulns_df[~vulns_df['mid'].isin(mids)]
+            # Sort the vulns by mid, severity
+            sorted_vulns_df = vulns_df.sort_values(by=['mid','severity'])
 
-        sorted_vulns_df = mid_filtered_df.sort_values(by=['mid','severity'])
+            # Emit the results to CSV
+            sorted_vulns_df.to_csv(f'{datetime.today().strftime("%Y%m%d")}_CVEs-{subaccount["accountName"]}.csv', sep=",")
 
-        sorted_vulns_df.to_csv(f'{datetime.today().strftime("%Y%m%d")}_CVEs-{subaccount["accountName"]}.csv', sep=",")
+            print(len(sorted_vulns_df.index))
+            if len(sorted_vulns_df.index) == 500_000:
+                print(f'Vuln records truncated for subaccount {subaccount["accountName"]}!')
+            print(f'{subaccount["accountName"]} completed.')
+        
+        else:
+            print(f'{subaccount["accountName"]} completed.')
+            continue
+
 
 
 if __name__ == "__main__":
@@ -150,14 +176,14 @@ if __name__ == "__main__":
         help='The Lacework CLI profile to use'
     )
     parser.add_argument(
-        '-a', '--account',
-        default='default',
-        help='The account to target for machines running the images of interest'
+        '-d', '--days',
+        default=2,
+        help='Number of days for lookback'
     )
     parser.add_argument(
-        '-d', '--days',
-        default=1,
-        help='Number of days for lookback'
+        '-f', '--filter',
+        default='',
+        help='Desired hostname filter for mid lookup'
     )
     parser.add_argument(
         '--debug',
