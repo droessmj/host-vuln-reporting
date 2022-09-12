@@ -1,5 +1,4 @@
-import os,json
-import numpy as np
+import os
 import pandas as pd
 import logging
 import argparse
@@ -133,9 +132,9 @@ def main(args):
             # Emit the results to CSV
             sorted_vulns_df.to_csv(f'{datetime.today().strftime("%Y%m%d")}_CVEs-{subaccount["accountName"]}.csv', sep=",")
 
-            print(len(sorted_vulns_df.index))
-            if len(sorted_vulns_df.index) == 500_000:
-                print(f'Vuln records truncated for subaccount {subaccount["accountName"]}!')
+            if len(sorted_vulns_df.index) >= 500_000:
+                print(f'WARNING: Vuln records truncated for subaccount {subaccount["accountName"]}!')
+
             print(f'{subaccount["accountName"]} completed.')
         
         else:
