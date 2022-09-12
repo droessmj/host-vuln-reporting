@@ -99,9 +99,6 @@ def main(args):
     except Exception:
         raise    
 
-    # # Make Org-level API calls
-    # lw.set_org_level_access(True)
-
     # Grab the lacework accounts that the user has access to
     user_profile = lw_client.user_profile.get()
     user_profile_data = user_profile.get("data", {})[0]
