@@ -120,11 +120,8 @@ def main(args):
         mids = get_relevant_mids(lw_client, start_time, end_time, args.filter)
         if len(mids) > 0:
             vulns = get_host_vulns(lw_client, start_time, end_time, mids)
-            vulns_df = pd.json_normalize(vulns)
 
-            # https://stackoverflow.com/questions/27965295/dropping-rows-from-dataframe-based-on-a-not-in-condition
-            # Drop the vuln records for hosts not in our desired list
-            # mid_filtered_df = vulns_df[~vulns_df['mid'].isin(mids)]
+            vulns_df = pd.json_normalize(vulns)
 
             # Sort the vulns by mid, severity
             sorted_vulns_df = vulns_df.sort_values(by=['mid','severity'])
