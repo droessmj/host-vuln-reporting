@@ -212,8 +212,8 @@ def main(args):
                         del sorted_vulns_df[c]
 
                 # selectively keep machineTag columns, renaming as necessary
+                tags_to_keep = ['machineTags.Account', 'machineTags.AmiId', 'machineTags.Name', 'machineTags.ExternalIp', 'machineTags.VmProvider']
                 for c in [i for i in sorted_vulns_df.columns if 'machineTags' in i]:
-                    tags_to_keep = ['machineTags.Account', 'machineTags.AmiId', 'machineTags.Name', 'machineTags.ExternalIp', 'machineTags.VmProvider']
                     # keep the column if it's in the list of tags to keep, else drop
                     if not any([True if t == c else False for t in tags_to_keep]):
                         del sorted_vulns_df[c]
@@ -243,7 +243,7 @@ def main(args):
                     'featureKey.version_installed': 'VERSION_INSTALLED',
                     'fixInfo.fixed_version': 'FIX_VERSION',
                     'fixInfo.fix_available': 'FIX_AVAILABLE'
-                }, inplace=True)
+                })
 
                 # TODO: convert 1/0 to True/False
                 #sorted_vulns_df["FIX_AVAILABLE"] = sorted_vulns_df["FIX_AVAILABLE"].astype(bool)
