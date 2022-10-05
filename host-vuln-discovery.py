@@ -165,13 +165,13 @@ def main(args):
             # into batches of N for the moment. Also, Python has no issue if idx exceeds the length 
             # of the array, hence no bounds checking on the back side
             batch_count = 0
-            batch_size = 5_000
+            batch_size = 10_000
             logger.debug(f'total mid count: {mid_count}')
 
             executor_tasks = list()
 
             if mid_count > batch_size : 
-                with ThreadPoolExecutor() as executor:
+                with ThreadPoolExecutor(max_workers=25) as executor:
                     idx = batch_count * batch_size
 
                     while (idx < mid_count):
@@ -179,7 +179,7 @@ def main(args):
                         batch_count += 1
                         idx = batch_count * batch_size
 
-                        if args.testing:
+                        if args.testing: # early break 
                             idx  = mid_count
                     
                     #TODO: Multithread pagination? 
