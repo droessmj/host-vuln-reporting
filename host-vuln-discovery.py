@@ -245,9 +245,9 @@ def main(args):
                     'fixInfo.fix_available': 'FIX_AVAILABLE'
                 }, inplace=True)
 
-                # convert 1/0 to True/False
+                # TODO: convert 1/0 to True/False
                 #sorted_vulns_df["FIX_AVAILABLE"] = sorted_vulns_df["FIX_AVAILABLE"].astype(bool)
-                sorted_vulns_df["PACKAGE_ACTIVE"] = sorted_vulns_df["PACKAGE_ACTIVE"].astype(bool)
+                #sorted_vulns_df["PACKAGE_ACTIVE"] = sorted_vulns_df["PACKAGE_ACTIVE"].astype(bool)
 
             sorted_vulns_df = sorted_vulns_df.astype(str).drop_duplicates()
             print(f'...writing results to file...')
