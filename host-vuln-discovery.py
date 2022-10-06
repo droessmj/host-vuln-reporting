@@ -6,10 +6,9 @@ import copy
 
 from datetime import datetime, timedelta, timezone
 from laceworksdk import LaceworkClient
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
 
 logger = logging.getLogger('host-vuln')
-logger.setLevel(os.getenv('LOG_LEVEL', logging.INFO))
 
 def get_start_end_times(day_delta=1):
     current_time = datetime.now(timezone.utc)
@@ -56,7 +55,7 @@ def get_machine_info(lw_client, start_time, end_time, args):
     return machine_info
 
 
-def get_host_vulns(lw_client, start_time, end_time, include_fixed, mids):
+def get_host_vulns(lw_client, start_time, end_time, include_fixed, mids, idx):
 
     values = ["Active","New","Reopened"]
     if include_fixed:
@@ -78,7 +77,8 @@ def get_host_vulns(lw_client, start_time, end_time, include_fixed, mids):
                 "expression": "in",
                 "values": mids
             }
-        ]
+        ],
+        "returns": ["machineTags","featureKey","fixInfo","mid","severity","status","vulnId"]
     })
 
     vulns = list()
@@ -86,7 +86,7 @@ def get_host_vulns(lw_client, start_time, end_time, include_fixed, mids):
         for vuln in r['data']:
             vulns.append(vuln)
 
-    return vulns
+    return (idx, vulns)
 
 
 def parse_mids(machine_info):
@@ -120,11 +120,110 @@ def get_online_hosts(lw_client):
     return mids
 
 
-def main(args):
+def worker(args, lw_client, start_time, end_time, machine_df, active_machines, mids, idx):
 
+        start_idx = idx
+        vulns = list()
+        _, vulns = get_host_vulns(lw_client, start_time, end_time, args.include_fixed, mids, idx)
+
+        logger.info("Starting vuln normalization...")
+        # TODO -- opportunity to speed up processing
+        vulns_df = pd.json_normalize(vulns)
+        logger.info("Vuln normalization complete.")
+
+        logger.info("Starting vuln de-dupe...")
+        # TODO -- opportunity to speed up processing
+        # Thought...can we de-dupe before we normalize?
+        #vulns_df = vulns_df.astype(str).drop_duplicates()
+        logger.info("Vuln de-deup complete.")
+
+        # Sort the vulns by mid, severity
+        logger.info("Starting sort...")
+        sorted_vulns_df = vulns_df.sort_values(by=['mid','severity'])
+        logger.info("Sort complete.")
+
+        if args.machine_details:
+
+            logger.info("Starting merge...")
+            # TODO -- opportunity to speed up processing
+            # -- attempt 1 here...
+            sorted_vulns_df = sorted_vulns_df.merge(machine_df, on='mid', how='left', suffixes=('','_machine_info'))
+            logger.info("Merge complete...")
+
+            logger.info("Starting column shift...")
+            # drop all cols we don't need in the final report
+            for c in sorted_vulns_df.columns:
+                if (('cveProps' in c) 
+                    or ('machine_info' in c) 
+                    or ('evalCtx.' in c) 
+                    or ('props' in c) 
+                    or ('featureKey.package_path' in c)
+                    or ('startTime' in c)
+                    or ('evalCtx.mc_eval_guid' in c)):
+                    del sorted_vulns_df[c]
+
+            # selectively keep machineTag columns, renaming as necessary
+            tags_to_keep = ['machineTags.Account', 'machineTags.AmiId', 'machineTags.Name', 'machineTags.ExternalIp', 'machineTags.VmProvider']
+            for c in [i for i in sorted_vulns_df.columns if 'machineTags' in i]:
+                # keep the column if it's in the list of tags to keep, else drop
+                if not any([True if t == c else False for t in tags_to_keep]):
+                    del sorted_vulns_df[c]
+
+            del sorted_vulns_df['entityType']
+            logger.info("Column shift complete.")
+
+            # TOOD: WHY???
+            logger.info("Dropping duplicate records...")
+            sorted_vulns_df = sorted_vulns_df.astype(str).drop_duplicates()
+            logger.info("Duplicates dropped.")
+
+            logger.info("Setting host status...")
+            # TODO -- opportunity to speed up processing
+            sorted_vulns_df["HOST_TYPE"] = "offline"
+            for idx,_ in sorted_vulns_df.iterrows():
+                if sorted_vulns_df.loc[idx,'mid'] in active_machines:
+                    sorted_vulns_df.loc[idx,'HOST_TYPE'] = 'online'
+            logger.info("Host status set.")
+
+            logger.info("Starting column rename...")
+            sorted_vulns_df = sorted_vulns_df.rename(columns={
+                'primaryIpAddr':'INTERNAL_IP',
+                'machineTags.Account': 'ACCOUNT_ID', 
+                'machineTags.AmiId': 'AMI_ID', 
+                'machineTags.Name': 'NAME', 
+                'machineTags.ExternalIp': 'EXTERNAL_IP', 
+                'machineTags.VmProvider': 'VMPROVIDER',
+                'featureKey.name': 'PACKAGE',
+                'featureKey.namespace': 'PACKAGE_NAMESPACE',
+                'featureKey.package_active': 'PACKAGE_ACTIVE',
+                'featureKey.version_installed': 'VERSION_INSTALLED',
+                'fixInfo.fixed_version': 'FIX_VERSION',
+                'fixInfo.fix_available': 'FIX_AVAILABLE'
+            })
+            logger.info("Column rename complete.")
+
+            # TODO: convert 1/0 to True/False
+            #sorted_vulns_df["FIX_AVAILABLE"] = sorted_vulns_df["FIX_AVAILABLE"].astype(bool)
+            #sorted_vulns_df["PACKAGE_ACTIVE"] = sorted_vulns_df["PACKAGE_ACTIVE"].astype(bool)
+
+        logger.info("Dropping duplicate records...")
+        sorted_vulns_df = sorted_vulns_df.astype(str).drop_duplicates()
+        logger.info("Duplicates dropped.")
+
+        print(f'Thread index {start_idx} completed.')
+        return start_idx, sorted_vulns_df
+
+
+def main(args):
     if args.debug:
         logger.setLevel('DEBUG')
         logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(
+            format='%(asctime)s %(levelname)-8s %(message)s',
+            level=logging.INFO,
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
 
     # Use enviroment variables to instantiate a LaceworkClient instance
     try:
@@ -147,119 +246,70 @@ def main(args):
 
     # Iterate through all subaccounts
     for subaccount in user_profile_data.get("accounts", []):
-
-        # Print the account name
-        print(f'Processing {subaccount["accountName"]}...')
-
+        logger.info(f'Processing {subaccount["accountName"]}...')
         lw_client.set_subaccount(subaccount["accountName"])
 
         machine_info = get_machine_info(lw_client, start_time, end_time, args)
         mids = parse_mids(machine_info)
         mid_count = len(mids)
 
+        logger.info("Getting online hosts...")
+        # get all hosts that checked in within the past ~hour and add as online/offline
+        active_machines = get_online_hosts(lw_client)
+        logger.info("Online hosts retrieved.")
+
+        if args.machine_details:
+            logger.info("Starting machine normalization...")
+            machine_df = pd.json_normalize(machine_info)
+            logger.info("Machine normalization complete.")
+        else:
+            machine_df = pd.DataFrame()
+
         if mid_count > 0:
-            
-            vulns = list()
 
-            # I've seen issues when putting all the mids through at once, so we should batch them 
-            # into batches of N for the moment. Also, Python has no issue if idx exceeds the length 
-            # of the array, hence no bounds checking on the back side
-            batch_count = 0
-            batch_size = 10_000
-            logger.debug(f'total mid count: {mid_count}')
-
+            sorted_vulns_df = pd.DataFrame()
             executor_tasks = list()
 
+            batch_count = 0
+            batch_size = 100
+            logger.debug(f'total mid count: {mid_count}')
+
             if mid_count > batch_size : 
-                with ThreadPoolExecutor(max_workers=25) as executor:
+
+                dataframes = []
+                with ProcessPoolExecutor() as executor:
                     idx = batch_count * batch_size
 
                     while (idx < mid_count):
-                        executor_tasks.append(executor.submit(get_host_vulns, copy.deepcopy(lw_client), start_time, end_time, args.include_fixed, mids[idx:(idx+ batch_size)]))
+                        logging.info(f'Firing off thread with index {idx}')
+                        # worker(args, lw_client, start_time, end_time, machine_info, mids, idx):
+                        executor_tasks.append(executor.submit(worker, args, copy.deepcopy(lw_client), start_time, end_time, machine_df, active_machines, mids[idx:(idx+ batch_size)], idx))
                         batch_count += 1
                         idx = batch_count * batch_size
-
-                        if args.testing: # early break 
-                            idx  = mid_count
-                    
-                    #TODO: Multithread pagination? 
-                    
+                
                     for task in as_completed(executor_tasks):
-                        result = task.result()
-                        vulns.extend(result)
+                        idx, result = task.result()
+                        logging.info(f'Joined thread with index {idx}')
+                        dataframes.append(result)
+
+                logger.info("Starting dataframe concat...")
+                sorted_vulns_df = pd.concat(dataframes)
+                logger.info("Finished dataframe concat.")
 
             else:
-                vulns.extend(get_host_vulns(lw_client, start_time, end_time, args.include_fixed, mids))
+                idx, sorted_vulns_df = worker(copy.deepcopy(args, lw_client), start_time, end_time, machine_df, active_machines, mids[idx:(idx+ batch_size)], idx)
 
-            vulns_df = pd.json_normalize(vulns)
+            # logger.info("Final dropping duplicate records...")
+            # sorted_vulns_df = sorted_vulns_df.astype(str).drop_duplicates()
+            # logger.info("Final duplicates dropped.")
 
-            # Sort the vulns by mid, severity
-            sorted_vulns_df = vulns_df.sort_values(by=['mid','severity'])
-
-            if args.machine_details:
-                machine_df = pd.json_normalize(machine_info)
-                sorted_vulns_df = sorted_vulns_df.merge(machine_df, on='mid', how='left', suffixes=('','_machine_info'))
-
-                # drop all cols we don't need in the final report
-                for c in sorted_vulns_df.columns:
-                    if (('cveProps' in c) 
-                        or ('machine_info' in c) 
-                        or ('evalCtx.' in c) 
-                        or ('props' in c) 
-                        or ('featureKey.package_path' in c)
-                        or ('evalCtx.mc_eval_guid' in c)):
-                        del sorted_vulns_df[c]
-
-                # selectively keep machineTag columns, renaming as necessary
-                tags_to_keep = ['machineTags.Account', 'machineTags.AmiId', 'machineTags.Name', 'machineTags.ExternalIp', 'machineTags.VmProvider']
-                for c in [i for i in sorted_vulns_df.columns if 'machineTags' in i]:
-                    # keep the column if it's in the list of tags to keep, else drop
-                    if not any([True if t == c else False for t in tags_to_keep]):
-                        del sorted_vulns_df[c]
-
-                del sorted_vulns_df['entityType']
-
-                # get all hosts that checked in within the past ~hour and add as online/offline
-                active_machines = get_online_hosts(lw_client)
-
-                sorted_vulns_df.insert(len(sorted_vulns_df.columns), "HOST_TYPE", "offline")
-                for idx,_ in sorted_vulns_df.iterrows():
-                    if sorted_vulns_df.loc[idx,'mid'] in active_machines:
-                       sorted_vulns_df.loc[idx,'HOST_TYPE'] = 'online'
-                    else:
-                        sorted_vulns_df.loc[idx,'HOST_TYPE'] = 'offline'
-
-                sorted_vulns_df = sorted_vulns_df.rename(columns={
-                    'primaryIpAddr':'INTERNAL_IP',
-                    'machineTags.Account': 'ACCOUNT_ID', 
-                    'machineTags.AmiId': 'AMI_ID', 
-                    'machineTags.Name': 'NAME', 
-                    'machineTags.ExternalIp': 'EXTERNAL_IP', 
-                    'machineTags.VmProvider': 'VMPROVIDER',
-                    'featureKey.name': 'PACKAGE',
-                    'featureKey.namespace': 'PACKAGE_NAMESPACE',
-                    'featureKey.package_active': 'PACKAGE_ACTIVE',
-                    'featureKey.version_installed': 'VERSION_INSTALLED',
-                    'fixInfo.fixed_version': 'FIX_VERSION',
-                    'fixInfo.fix_available': 'FIX_AVAILABLE'
-                })
-
-                # TODO: convert 1/0 to True/False
-                #sorted_vulns_df["FIX_AVAILABLE"] = sorted_vulns_df["FIX_AVAILABLE"].astype(bool)
-                #sorted_vulns_df["PACKAGE_ACTIVE"] = sorted_vulns_df["PACKAGE_ACTIVE"].astype(bool)
-
-            sorted_vulns_df = sorted_vulns_df.astype(str).drop_duplicates()
-            print(f'...writing results to file...')
-
+            logger.info("Starting CSV write...")
             # Emit the results to CSV
             sorted_vulns_df.to_csv(f'{datetime.today().strftime("%Y%m%d")}_CVEs-{subaccount["accountName"]}.csv', sep=",")
+            logger.info("CSV write complete.")
 
-            print(f'{subaccount["accountName"]} completed.')
+            logger.info(f'{subaccount["accountName"]} completed.')
         
-        else:
-            print(f'{subaccount["accountName"]} completed.')
-            continue
-
 
 
 if __name__ == "__main__":
