@@ -90,9 +90,9 @@ def get_host_vulns(lw_client, start_time, end_time, include_fixed, mids, idx):
 
 
 def parse_mids(machine_info):
-    mids = list()
+    mids = set()
     for r in machine_info:
-        mids.append(r['mid'])
+        mids.add(r['mid'])
 
     return mids
 
@@ -159,6 +159,7 @@ def worker(args, lw_client, start_time, end_time, machine_df, active_machines, m
                     or ('props' in c) 
                     or ('featureKey.package_path' in c)
                     or ('startTime' in c)
+                    or ('endTime' in c)
                     or ('evalCtx.mc_eval_guid' in c)):
                     del sorted_vulns_df[c]
 
@@ -251,6 +252,7 @@ def main(args):
 
         machine_info = get_machine_info(lw_client, start_time, end_time, args)
         mids = parse_mids(machine_info)
+        mids = list(mids)
         mid_count = len(mids)
 
         logger.info("Getting online hosts...")
@@ -283,7 +285,7 @@ def main(args):
                     while (idx < mid_count):
                         logging.info(f'Firing off thread with index {idx}')
                         # worker(args, lw_client, start_time, end_time, machine_info, mids, idx):
-                        executor_tasks.append(executor.submit(worker, args, copy.deepcopy(lw_client), start_time, end_time, machine_df, active_machines, mids[idx:(idx+ batch_size)], idx))
+                        executor_tasks.append(executor.submit(worker, args, copy.deepcopy(lw_client), start_time, end_time, machine_df, active_machines, mids[idx:(idx+batch_size)], idx))
                         batch_count += 1
                         idx = batch_count * batch_size
                 
@@ -297,7 +299,7 @@ def main(args):
                 logger.info("Finished dataframe concat.")
 
             else:
-                idx, sorted_vulns_df = worker(copy.deepcopy(args, lw_client), start_time, end_time, machine_df, active_machines, mids[idx:(idx+ batch_size)], idx)
+                idx, sorted_vulns_df = worker(copy.deepcopy(args, lw_client), start_time, end_time, machine_df, active_machines, mids[idx:(idx + batch_size)], idx)
 
             # logger.info("Final dropping duplicate records...")
             # sorted_vulns_df = sorted_vulns_df.astype(str).drop_duplicates()
