@@ -13,8 +13,8 @@ logger = logging.getLogger('host-vuln')
 def get_start_end_times(day_delta=1):
     current_time = datetime.now(timezone.utc)
     start_time = current_time - timedelta(days=day_delta)
-    start_time = start_time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    end_time = current_time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    start_time = start_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+    end_time = current_time.strftime('%Y-%m-%dT%H:%M:%SZ')
 
     return start_time, end_time
 
@@ -120,7 +120,36 @@ def get_online_hosts(lw_client):
     return mids
 
 
-def worker(args, lw_client, start_time, end_time, machine_df, active_machines, mids, idx):
+def convert_uptime_to_string(uptime_timestamp):
+    # convert milliseconds to seconds
+    uptime_timestamp_seconds = int(uptime_timestamp / 1_000)
+    boot_time = (datetime.fromtimestamp(uptime_timestamp_seconds))
+    time_delta = datetime.now() - (boot_time)
+
+    return str(time_delta)
+
+
+def get_machine_uptimes(lw_client, start_time, end_time):
+
+    queryText = '{ source { LW_HE_MACHINES } return distinct {MID, LAST_BOOT_TIME} }'
+        
+    uptimes = lw_client.queries.execute(
+        query_text = queryText,
+        arguments= {
+            "StartTimeRange": start_time,
+            "EndTimeRange": end_time
+        }
+    )
+
+    uptime_map = {}
+    response = uptimes.get('data',[])
+    for record in response:
+        uptime_map[int(record['MID'])] = convert_uptime_to_string(record['LAST_BOOT_TIME'])
+
+    return uptime_map
+
+
+def worker(args, lw_client, start_time, end_time, machine_df, active_machines, mids, idx, uptime_map):
 
         start_idx = idx
         vulns = list()
@@ -180,10 +209,13 @@ def worker(args, lw_client, start_time, end_time, machine_df, active_machines, m
 
             logger.info("Setting host status...")
             sorted_vulns_df["HOST_TYPE"] = "offline"
+            sorted_vulns_df["UPTIME"] = "0"
             sorted_vulns_df["mid"] = sorted_vulns_df['mid'].astype(int)
             for idx,_ in sorted_vulns_df.iterrows():
                 if sorted_vulns_df.loc[idx,'mid'] in active_machines:
                     sorted_vulns_df.loc[idx,'HOST_TYPE'] = 'online'
+                if sorted_vulns_df.loc[idx,'mid'] in uptime_map:
+                    sorted_vulns_df.loc[idx, 'UPTIME'] = uptime_map[sorted_vulns_df.loc[idx,'mid']]
             logger.info("Host status set.")
 
             logger.info("Starting column rename...")
@@ -255,6 +287,8 @@ def main(args):
         mids = list(mids)
         mid_count = len(mids)
 
+        uptime_map = get_machine_uptimes(lw_client, start_time, end_time)
+
         logger.info("Getting online hosts...")
         # get all hosts that checked in within the past ~hour and add as online/offline
         active_machines = get_online_hosts(lw_client)
@@ -285,7 +319,7 @@ def main(args):
                     while (idx < mid_count):
                         logging.info(f'Firing off thread with index {idx}')
                         # worker(args, lw_client, start_time, end_time, machine_info, mids, idx):
-                        executor_tasks.append(executor.submit(worker, args, copy.deepcopy(lw_client), start_time, end_time, machine_df, active_machines, mids[idx:(idx+batch_size)], idx))
+                        executor_tasks.append(executor.submit(worker, args, copy.deepcopy(lw_client), start_time, end_time, machine_df, active_machines, mids[idx:(idx+batch_size)], idx, uptime_map))
                         batch_count += 1
                         idx = batch_count * batch_size
                 
@@ -299,7 +333,7 @@ def main(args):
                 logger.info("Finished dataframe concat.")
 
             else:
-                idx, sorted_vulns_df = worker(copy.deepcopy(args, lw_client), start_time, end_time, machine_df, active_machines, mids[idx:(idx + batch_size)], idx)
+                idx, sorted_vulns_df = worker(copy.deepcopy(args, lw_client), start_time, end_time, machine_df, active_machines, mids[idx:(idx + batch_size)], idx, uptime_map)
 
             # logger.info("Final dropping duplicate records...")
             # sorted_vulns_df = sorted_vulns_df.astype(str).drop_duplicates()
