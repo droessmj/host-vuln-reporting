@@ -115,7 +115,7 @@ def get_online_hosts(lw_client):
     mids = set()
     for r in active_machines:
         for m in r['data']:
-            mids.add(m['mid'])
+            mids.add(int(m['mid']))
 
     return mids
 
@@ -179,8 +179,8 @@ def worker(args, lw_client, start_time, end_time, machine_df, active_machines, m
             logger.info("Duplicates dropped.")
 
             logger.info("Setting host status...")
-            # TODO -- opportunity to speed up processing
             sorted_vulns_df["HOST_TYPE"] = "offline"
+            sorted_vulns_df["mid"] = sorted_vulns_df['mid'].astype(int)
             for idx,_ in sorted_vulns_df.iterrows():
                 if sorted_vulns_df.loc[idx,'mid'] in active_machines:
                     sorted_vulns_df.loc[idx,'HOST_TYPE'] = 'online'
